@@ -59,6 +59,12 @@ LIMIT_YEARS = 5               # DVF géolocalisées ne remonte qu'à 5 ans
 MIN_PRICE_M2 = 500
 MAX_PRICE_M2 = 30_000
 
+# Ventes de « surface comparable » : entre 70 % et 130 % de la surface du bien.
+# Le prix au m² baisse quand la surface augmente (un studio se vend plus cher
+# au m² qu'un 4 pièces) : comparer à toutes les surfaces fausse l'écart.
+SURFACE_MIN_RATIO = 0.7
+SURFACE_MAX_RATIO = 1.3
+
 PROPERTY_TYPES = {"appartement": "Appartement", "maison": "Maison"}
 HOUSING_TYPES = set(PROPERTY_TYPES.values())
 OUTBUILDING_TYPE = "Dépendance"  # cave, parking, garage… : autorisés avec le logement
@@ -78,6 +84,7 @@ class Sale(NamedTuple):
     lng: float
     property_type: str   # "Appartement" ou "Maison"
     price_per_m2: float
+    surface: float = 0.0  # surface habitable en m²
 
 
 # ---------------------------------------------------------------- Internet
@@ -256,7 +263,7 @@ def _extract_sales(rows) -> list[Sale]:
         price_per_m2 = price / surface
         if not MIN_PRICE_M2 <= price_per_m2 <= MAX_PRICE_M2:
             continue
-        sales.append(Sale(housing["date_mutation"], lat, lng, housing["type_local"], price_per_m2))
+        sales.append(Sale(housing["date_mutation"], lat, lng, housing["type_local"], price_per_m2, surface))
     return sales
 
 
@@ -329,47 +336,88 @@ def _years_before(day: date, years: int) -> date:
         return day.replace(year=day.year - years, day=28)
 
 
+def _median_and_gap(prices: list[float], price_per_m2: float) -> tuple[int | None, float | None]:
+    """Médiane arrondie à l'euro et écart en % du bien par rapport à elle."""
+    if not prices:
+        return None, None
+    median = statistics.median(prices)
+    return round(median), round((price_per_m2 - median) / median * 100, 1)
+
+
+def _surface_range(surface_m2: float) -> tuple[float, float]:
+    """Plage des surfaces comparables (bornes incluses)."""
+    return round(surface_m2 * SURFACE_MIN_RATIO, 2), round(surface_m2 * SURFACE_MAX_RATIO, 2)
+
+
 def _compare(sales: list[Sale], lat: float, lng: float, price_per_m2: float,
-             max_radius_m: int, years: int) -> dict:
-    """Cœur du calcul, sans Internet : filtre période, rayon adaptatif, médiane, écart."""
+             max_radius_m: int, years: int, surface_m2: float | None = None) -> dict:
+    """Cœur du calcul, sans Internet : filtre période, rayon adaptatif, médiane, écart.
+
+    Sans surface_m2, toutes les ventes du type comptent. Avec surface_m2, seules
+    les ventes de surface comparable comptent pour le rayon adaptatif et la
+    médiane principale ; la médiane toutes surfaces est donnée en plus
+    (bloc all_sizes), calculée au même rayon pour comparer à périmètre égal.
+    """
+    if surface_m2 is None:
+        def is_comparable(sale: Sale) -> bool:
+            return True
+    else:
+        min_surface, max_surface = _surface_range(surface_m2)
+
+        def is_comparable(sale: Sale) -> bool:
+            return min_surface <= sale.surface <= max_surface
+
     if not sales:
-        return {
+        result = {
             "median_price_per_m2": None, "gap_percent": None, "radius_m": max_radius_m,
             "sales_count": 0, "reliable": False, "period": None, "latest_sale_date": None,
             "warning": "Aucune vente comparable trouvée dans DVF autour de ce point : comparaison impossible.",
         }
-    # La période se compte depuis la dernière vente connue : DVF a environ
-    # un an de retard sur l'actualité.
-    period_end = max(sale.date for sale in sales)
-    period_start = (_years_before(date.fromisoformat(period_end), years) + timedelta(days=1)).isoformat()
-    recent = [sale for sale in sales if sale.date >= period_start]
-    with_distance = [(_distance_m(lat, lng, s.lat, s.lng), s) for s in recent]
+        in_radius = []
+    else:
+        # La période se compte depuis la dernière vente connue : DVF a environ
+        # un an de retard sur l'actualité.
+        period_end = max(sale.date for sale in sales)
+        period_start = (_years_before(date.fromisoformat(period_end), years) + timedelta(days=1)).isoformat()
+        recent = [sale for sale in sales if sale.date >= period_start]
+        with_distance = [(_distance_m(lat, lng, s.lat, s.lng), s) for s in recent]
 
-    for radius in _radii(max_radius_m):
-        used = [sale for distance, sale in with_distance if distance <= radius]
-        if len(used) >= MIN_SALES:
-            break
-    prices = [sale.price_per_m2 for sale in used]
+        # Le rayon s'élargit tant qu'il y a moins de MIN_SALES ventes comparables.
+        for radius in _radii(max_radius_m):
+            in_radius = [sale for distance, sale in with_distance if distance <= radius]
+            used = [sale for sale in in_radius if is_comparable(sale)]
+            if len(used) >= MIN_SALES:
+                break
 
-    result = {
-        "median_price_per_m2": round(statistics.median(prices)) if prices else None,
-        "gap_percent": None,
-        "radius_m": radius,
-        "sales_count": len(prices),
-        "reliable": len(prices) >= MIN_SALES,
-        "period": {"from": period_start, "to": period_end},
-        # Date de la vente la plus récente parmi celles réellement utilisées.
-        "latest_sale_date": max(sale.date for sale in used) if used else None,
-    }
-    if prices:
-        median = statistics.median(prices)
-        result["gap_percent"] = round((price_per_m2 - median) / median * 100, 1)
-    if not result["reliable"]:
-        result["warning"] = (
-            f"PEU FIABLE : seulement {len(prices)} vente(s) comparable(s) dans un rayon de "
-            f"{radius} m (minimum souhaité : {MIN_SALES}). Essayez un max_radius_m plus grand "
-            "ou une période plus longue."
-        )
+        median, gap = _median_and_gap([sale.price_per_m2 for sale in used], price_per_m2)
+        result = {
+            "median_price_per_m2": median,
+            "gap_percent": gap,
+            "radius_m": radius,
+            "sales_count": len(used),
+            "reliable": len(used) >= MIN_SALES,
+            "period": {"from": period_start, "to": period_end},
+            # Date de la vente la plus récente parmi celles réellement utilisées.
+            "latest_sale_date": max(sale.date for sale in used) if used else None,
+        }
+        if not result["reliable"]:
+            what = "vente(s) comparable(s)"
+            if surface_m2 is not None:
+                what = f"vente(s) de surface comparable ({min_surface:g}–{max_surface:g} m²)"
+            result["warning"] = (
+                f"PEU FIABLE : seulement {len(used)} {what} dans un rayon de "
+                f"{radius} m (minimum souhaité : {MIN_SALES}). Essayez un max_radius_m plus grand "
+                "ou une période plus longue."
+            )
+
+    if surface_m2 is not None:
+        all_median, all_gap = _median_and_gap([sale.price_per_m2 for sale in in_radius], price_per_m2)
+        result["surface_range_m2"] = {"min": min_surface, "max": max_surface}
+        result["all_sizes"] = {
+            "median_price_per_m2": all_median,
+            "gap_percent": all_gap,
+            "sales_count": len(in_radius),
+        }
     return result
 
 
@@ -382,12 +430,21 @@ def price_vs_market(
     price_per_m2: float,
     max_radius_m: int = DEFAULT_MAX_RADIUS_M,
     years: int = DEFAULT_YEARS,
+    surface_m2: float | None = None,
 ) -> dict:
     """Compare a property's price per m² with real nearby sales (French DVF open data).
 
+    IMPORTANT: always pass surface_m2 when the property's living area is known.
+    Price per m² drops as surface grows (studios sell for more per m² than
+    large flats), so without surface_m2 the property is compared with sales of
+    all sizes and the gap is biased: large properties look cheaper than the
+    market, small ones look more expensive.
+
     Looks for sales of the same property type around the point, starting at a
     500 m radius and widening by 250 m steps up to max_radius_m until at least
-    10 sales are found. Returns the median price per m² of those sales and the
+    10 sales are found. With surface_m2, only sales between 70 % and 130 % of
+    that surface count (for the radius, the median and the gap), and the
+    median over all sizes is returned too, in all_sizes, for comparison. Returns the median price per m² of those sales and the
     gap in percent (positive = the property is more expensive than the market).
     Works everywhere in France except Alsace-Moselle (57, 67, 68) and Mayotte,
     which are not covered by DVF. The period is counted back from the most
@@ -400,12 +457,17 @@ def price_vs_market(
         price_per_m2: Asking price per m² of the property, in euros.
         max_radius_m: Maximum search radius in meters (default 1000).
         years: Number of years of sales to use (default 3, max 5).
+        surface_m2: Living area of the property in m². Strongly recommended
+            (see above); omit it only if the surface is unknown.
 
     Returns:
         median_price_per_m2, gap_percent, radius_m (radius finally used),
         sales_count, reliable (False if fewer than 10 sales), period {from, to},
         latest_sale_date (most recent sale among those used),
         warning (only when the result is not reliable), property_type, source.
+        With surface_m2, the first fields describe comparable-size sales only,
+        plus surface_range_m2 {min, max} and all_sizes {median_price_per_m2,
+        gap_percent, sales_count} computed over all sizes at the same radius.
     """
     if not (-90 <= lat <= 90 and -180 <= lng <= 180):
         raise ValueError("Coordonnées invalides : lat doit être entre -90 et 90, lng entre -180 et 180.")
@@ -418,6 +480,8 @@ def price_vs_market(
         raise ValueError(f"max_radius_m doit être entre 1 et {LIMIT_MAX_RADIUS_M} mètres.")
     if not 1 <= years <= LIMIT_YEARS:
         raise ValueError(f"years doit être entre 1 et {LIMIT_YEARS}.")
+    if surface_m2 is not None and surface_m2 <= 0:
+        raise ValueError("surface_m2 doit être strictement positif.")
 
     center, communes = _communes_around(lat, lng, max_radius_m)
     if center is None and not communes:
@@ -441,7 +505,7 @@ def price_vs_market(
         if sale.property_type == dvf_type
     ]
 
-    result = _compare(sales, lat, lng, price_per_m2, max_radius_m, years)
+    result = _compare(sales, lat, lng, price_per_m2, max_radius_m, years, surface_m2)
     result["property_type"] = property_type.strip().lower()
     result["source"] = "DVF géolocalisées (Etalab / DGFiP), data.gouv.fr"
     return result

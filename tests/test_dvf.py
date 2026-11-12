@@ -23,10 +23,10 @@ LAT, LNG = 43.58, 7.125
 
 
 def sale_at(distance_m: float, price_per_m2: float, day: str = "2025-06-01",
-            property_type: str = "Appartement") -> Sale:
+            property_type: str = "Appartement", surface: float = 50.0) -> Sale:
     """Fausse vente située `distance_m` mètres au nord du point de référence."""
     lat, lng = dvf._point_at(LAT, LNG, distance_m, 0)
-    return Sale(day, lat, lng, property_type, price_per_m2)
+    return Sale(day, lat, lng, property_type, price_per_m2, surface)
 
 
 def dvf_row(mutation: str, type_local: str, surface: str = "50", value: str = "250000",
@@ -47,6 +47,7 @@ class ExtractSalesTest(unittest.TestCase):
         sales = _extract_sales([dvf_row("M1", "Appartement", surface="50", value="250000")])
         self.assertEqual(len(sales), 1)
         self.assertEqual(sales[0].price_per_m2, 5000)
+        self.assertEqual(sales[0].surface, 50)
 
     def test_apartment_with_outbuildings_is_kept(self):
         # Appartement + cave + parking : le prix total reste celui du logement.
@@ -166,7 +167,8 @@ class PriceVsMarketTest(unittest.TestCase):
 
     def test_rejects_invalid_parameters(self):
         for kwargs in ({"property_type": "studio"}, {"price_per_m2": 0}, {"max_radius_m": 0},
-                       {"max_radius_m": 10_000}, {"years": 0}, {"years": 6}, {"lat": 123.0}):
+                       {"max_radius_m": 10_000}, {"years": 0}, {"years": 6}, {"lat": 123.0},
+                       {"surface_m2": 0}, {"surface_m2": -20}):
             params = {"lat": LAT, "lng": LNG, "property_type": "appartement", "price_per_m2": 5000} | kwargs
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
                 price_vs_market(**params)
@@ -180,6 +182,75 @@ class PriceVsMarketTest(unittest.TestCase):
         with mock.patch.object(dvf, "_communes_around", return_value=(None, set())):
             with self.assertRaises(ValueError):
                 price_vs_market(43.0, 7.5, "appartement", 5000)
+
+
+class SurfaceFilterTest(unittest.TestCase):
+    """Paramètre surface_m2 : ne comparer qu'aux ventes de surface comparable."""
+
+    # Quartier type : beaucoup de studios chers au m², quelques grands appartements.
+    STUDIOS = [sale_at(100, 7000, surface=25)] * 15
+    LARGE = [sale_at(100, 4800, surface=60), sale_at(100, 5000, surface=70),
+             sale_at(100, 5200, surface=85)] * 4  # 12 ventes de 60 à 85 m²
+
+    def test_without_surface_result_is_unchanged(self):
+        # Même appel avec surface_m2=None ou sans le paramètre : réponse identique,
+        # sans aucun nouveau champ.
+        sales = self.STUDIOS + self.LARGE
+        explicit_none = _compare(sales, LAT, LNG, 5000, 1000, 3, surface_m2=None)
+        self.assertEqual(explicit_none, _compare(sales, LAT, LNG, 5000, 1000, 3))
+        self.assertNotIn("all_sizes", explicit_none)
+        self.assertNotIn("surface_range_m2", explicit_none)
+        self.assertEqual(explicit_none["sales_count"], 27)
+
+    def test_large_flat_no_longer_looks_cheap(self):
+        result = _compare(self.STUDIOS + self.LARGE, LAT, LNG, 5000, 1000, 3, surface_m2=70)
+        # Toutes surfaces : la médiane est tirée vers le haut par les studios.
+        self.assertEqual(result["all_sizes"]["median_price_per_m2"], 7000)
+        self.assertEqual(result["all_sizes"]["gap_percent"], -28.6)
+        self.assertEqual(result["all_sizes"]["sales_count"], 27)
+        # Surfaces comparables (49–91 m²) : le bien est au prix du marché.
+        self.assertEqual(result["median_price_per_m2"], 5000)
+        self.assertEqual(result["gap_percent"], 0.0)
+        self.assertEqual(result["sales_count"], 12)
+        self.assertEqual(result["surface_range_m2"], {"min": 49.0, "max": 91.0})
+
+    def test_bounds_70_and_130_percent_are_included(self):
+        sales = ([sale_at(100, 5000, surface=70)] * 5 + [sale_at(100, 5000, surface=130)] * 5
+                 + [sale_at(100, 9000, surface=69.9)] * 5 + [sale_at(100, 9000, surface=130.1)] * 5)
+        result = _compare(sales, LAT, LNG, 5000, 1000, 3, surface_m2=100)
+        self.assertEqual(result["sales_count"], 10)
+        self.assertEqual(result["median_price_per_m2"], 5000)
+
+    def test_radius_grows_on_comparable_sales_count(self):
+        # 15 studios à 100 m suffiraient sans filtre ; les 10 ventes comparables
+        # ne sont atteintes qu'à 1 000 m.
+        sales = self.STUDIOS + [sale_at(600, 5000, surface=70)] * 4 + [sale_at(900, 5000, surface=70)] * 6
+        self.assertEqual(_compare(sales, LAT, LNG, 5000, 1000, 3)["radius_m"], 500)
+        result = _compare(sales, LAT, LNG, 5000, 1000, 3, surface_m2=70)
+        self.assertEqual(result["radius_m"], 1000)
+        self.assertEqual(result["sales_count"], 10)
+        self.assertTrue(result["reliable"])
+        # La médiane toutes surfaces est calculée au même rayon (1 000 m).
+        self.assertEqual(result["all_sizes"]["sales_count"], 25)
+
+    def test_fewer_than_10_comparable_sales_is_unreliable(self):
+        sales = self.STUDIOS + [sale_at(100, 5000, surface=70)] * 9
+        result = _compare(sales, LAT, LNG, 5000, 1000, 3, surface_m2=70)
+        self.assertEqual(result["radius_m"], 1000)
+        self.assertEqual(result["sales_count"], 9)
+        self.assertFalse(result["reliable"])
+        self.assertIn("PEU FIABLE", result["warning"])
+        self.assertIn("49–91 m²", result["warning"])
+
+    def test_latest_sale_date_comes_from_comparable_sales(self):
+        sales = [sale_at(100, 5000, "2025-03-01", surface=70)] * 10 + [sale_at(100, 7000, "2025-12-31", surface=25)]
+        result = _compare(sales, LAT, LNG, 5000, 1000, 3, surface_m2=70)
+        self.assertEqual(result["latest_sale_date"], "2025-03-01")
+
+    def test_no_sales_at_all_with_surface(self):
+        result = _compare([], LAT, LNG, 5000, 1000, 3, surface_m2=70)
+        self.assertFalse(result["reliable"])
+        self.assertEqual(result["all_sizes"]["sales_count"], 0)
 
 
 # Fichier DVF minimal : une vente d'appartement de 50 m² à 250 000 €.
@@ -299,6 +370,16 @@ class RealDataTest(unittest.TestCase):
         self.assertGreaterEqual(result["sales_count"], 10)
         self.assertTrue(result["reliable"])
         self.assertTrue(result["period"]["from"] <= result["latest_sale_date"] <= result["period"]["to"])
+
+    def test_antibes_center_with_surface(self):
+        try:
+            result = price_vs_market(43.58, 7.125, "appartement", 4000, surface_m2=67)
+        except RuntimeError as error:
+            self.skipTest(f"Données DVF inaccessibles : {error}")
+        self.assertTrue(4000 <= result["median_price_per_m2"] <= 8000, result)
+        self.assertGreaterEqual(result["sales_count"], 10)
+        self.assertLess(result["sales_count"], result["all_sizes"]["sales_count"])
+        self.assertEqual(result["surface_range_m2"], {"min": 46.9, "max": 87.1})
 
 
 if __name__ == "__main__":
