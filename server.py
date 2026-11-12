@@ -4,6 +4,8 @@ from typing import Optional
 import lbc
 from fastmcp import FastMCP
 
+from search_filters import build_real_estate_filters, city_names, keep_only_cities, lookup
+
 mcp = FastMCP("leboncoin", instructions=(
     "MCP server for searching Leboncoin (French classifieds). "
     "Use search_ads to find listings, get_ad for details on a specific ad, "
@@ -42,6 +44,7 @@ def _ad_to_dict(ad: lbc.Ad) -> dict:
         "location": {
             "city": loc.city_label,
             "zipcode": loc.zipcode,
+            "city_name": loc.city,
             "department": loc.department_name,
             "region": loc.region_name,
             "lat": loc.lat,
@@ -78,7 +81,7 @@ def _user_to_dict(user: lbc.User) -> dict:
 
 
 def _build_location(
-    city: Optional[str],
+    city: Optional[str | list[str]],
     latitude: Optional[float],
     longitude: Optional[float],
     radius: Optional[int],
@@ -90,13 +93,14 @@ def _build_location(
         locations.append(lbc.City(
             lat=latitude,
             lng=longitude,
-            radius=radius or 30_000,
-            city=city or "",
+            # 10 km quand une ville est donnée : 30 km ramenait Vallauris, Mougins, Cagnes...
+            radius=radius or (10_000 if city_names(city) else 30_000),
+            city=", ".join(city_names(city)),
         ))
-    if region and region.upper() in REGION_MAP:
-        locations.append(REGION_MAP[region.upper()])
-    if department and department.upper() in DEPARTMENT_MAP:
-        locations.append(DEPARTMENT_MAP[department.upper()])
+    if region:
+        locations.append(lookup(REGION_MAP, region, "Région"))
+    if department:
+        locations.append(lookup(DEPARTMENT_MAP, department, "Département"))
     return locations or None
 
 
@@ -105,7 +109,7 @@ def search_ads(
     text: Optional[str] = None,
     url: Optional[str] = None,
     category: Optional[str] = None,
-    city: Optional[str] = None,
+    city: Optional[str | list[str]] = None,
     latitude: Optional[float] = None,
     longitude: Optional[float] = None,
     radius: Optional[int] = None,
@@ -113,6 +117,12 @@ def search_ads(
     department: Optional[str] = None,
     price_min: Optional[int] = None,
     price_max: Optional[int] = None,
+    property_type: Optional[str] = None,
+    surface_min: Optional[int] = None,
+    surface_max: Optional[int] = None,
+    rooms_min: Optional[int] = None,
+    rooms_max: Optional[int] = None,
+    bedrooms_min: Optional[int] = None,
     sort: str = "NEWEST",
     ad_type: str = "OFFER",
     owner_type: Optional[str] = None,
@@ -122,6 +132,9 @@ def search_ads(
 ) -> dict:
     """Search for ads on Leboncoin.
 
+    One zone per search: Leboncoin only uses the first zone of a list (verified by
+    measurement on 12/11/2026), so give either latitude/longitude, or a region, or a department.
+
     Args:
         text: Search query (e.g. "vélo électrique", "appartement 3 pièces").
         url: Full Leboncoin search URL. Overrides text/category/location params.
@@ -129,7 +142,12 @@ def search_ads(
             Full list: TOUTES_CATEGORIES, EMPLOI, VEHICULES, VEHICULES_VOITURES, VEHICULES_MOTOS,
             IMMOBILIER, IMMOBILIER_VENTES_IMMOBILIERES, IMMOBILIER_LOCATIONS, ELECTRONIQUE,
             MAISON_ET_JARDIN, MODE, LOISIRS, ANIMAUX, SERVICES, DONS, DIVERS.
-        city: City name (informational, used with lat/lng).
+        city: One city or a list of cities (e.g. ["Antibes", "Juan-les-Pins"]).
+            Ads located elsewhere are removed (case and accents ignored);
+            "removed_by_city_filter" tells how many, "removed_cities" from which cities.
+            Ads with no city name are kept and marked city_check="ville inconnue".
+            "total" is counted before this filter.
+            Use with latitude/longitude (default radius then 10 km) or a department.
         latitude: Latitude for location search.
         longitude: Longitude for location search.
         radius: Search radius in meters (default 30000 = 30km).
@@ -137,6 +155,14 @@ def search_ads(
         department: Department name (e.g. PARIS, GIRONDE, BOUCHES_DU_RHONE).
         price_min: Minimum price in euros.
         price_max: Maximum price in euros.
+        property_type: Real estate only: appartement, maison, terrain, parking, autre.
+        surface_min: Minimum surface in m².
+        surface_max: Maximum surface in m².
+        rooms_min: Minimum number of rooms (pièces).
+        rooms_max: Maximum number of rooms (pièces).
+        bedrooms_min: Minimum number of bedrooms (chambres). NOT VERIFIED: the Leboncoin
+            filter name "bedrooms" is a guess; if wrong, Leboncoin may silently ignore it.
+            Check the "Nombre de chambres" attribute of each ad.
         sort: Sort order: NEWEST, OLDEST, CHEAPEST, EXPENSIVE, RELEVANCE.
         ad_type: OFFER or DEMAND.
         owner_type: PRO, PRIVATE, or ALL.
@@ -145,14 +171,22 @@ def search_ads(
         limit: Results per page (max 35).
     """
     kwargs = {}
+    real_estate = build_real_estate_filters(property_type, surface_min, surface_max,
+                                            rooms_min, rooms_max, bedrooms_min)
+    cities = city_names(city)
+    if url and real_estate:
+        raise ValueError("Avec url, Leboncoin ignore les autres filtres : mets-les dans l'URL ou retire url.")
+    if cities and not url and latitude is None and not region and not department:
+        raise ValueError("city seul ne localise pas la recherche : ajoute latitude/longitude ou department.")
 
     if url:
         kwargs["url"] = url
     else:
         if text:
             kwargs["text"] = text
-        if category and category.upper() in CATEGORY_MAP:
-            kwargs["category"] = CATEGORY_MAP[category.upper()]
+        if category:
+            kwargs["category"] = lookup(CATEGORY_MAP, category, "Catégorie")
+        kwargs.update(real_estate)
 
         locations = _build_location(city, latitude, longitude, radius, region, department)
         if locations:
@@ -175,6 +209,10 @@ def search_ads(
     kwargs["limit_alu"] = 0
 
     result = _client.search(**kwargs)
+    ads = [_ad_to_dict(ad) for ad in result.ads]
+    removed = {}
+    if cities:
+        ads, removed = keep_only_cities(ads, cities)
 
     return {
         "total": result.total,
@@ -182,7 +220,9 @@ def search_ads(
         "total_private": result.total_private,
         "max_pages": result.max_pages,
         "page": page,
-        "ads": [_ad_to_dict(ad) for ad in result.ads],
+        "removed_by_city_filter": sum(removed.values()),
+        "removed_cities": removed,
+        "ads": ads,
     }
 
 

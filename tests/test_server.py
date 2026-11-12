@@ -16,7 +16,7 @@ SELLER_ID = "844a5547-c5fb-41ee-b7dc-45c050a9ce35"
 
 def fake_ad() -> SimpleNamespace:
     """Fausse annonce avec juste les champs lus par get_ad."""
-    location = SimpleNamespace(city_label="Antibes 06600", zipcode="06600", department_name="Alpes-Maritimes",
+    location = SimpleNamespace(city_label="Antibes 06600", city="Antibes", zipcode="06600", department_name="Alpes-Maritimes",
                                region_name="Provence-Alpes-Côte d'Azur", lat=43.58, lng=7.12)
     return SimpleNamespace(
         id=3225428585, subject="Appartement 3 pièces 67 m²", price=265000,
