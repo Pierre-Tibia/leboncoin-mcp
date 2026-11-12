@@ -231,6 +231,9 @@ def list_departments() -> list[str]:
 from coast import walking_time_to_coast  # noqa: E402
 mcp.tool()(walking_time_to_coast)
 
+from dvf import price_vs_market  # noqa: E402
+mcp.tool()(price_vs_market)
+
 
 if __name__ == "__main__":
     import sys
