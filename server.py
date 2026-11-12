@@ -228,6 +228,10 @@ def list_departments() -> list[str]:
     return [item.name for item in lbc.Department]
 
 
+from coast import walking_time_to_coast  # noqa: E402
+mcp.tool()(walking_time_to_coast)
+
+
 if __name__ == "__main__":
     import sys
 
