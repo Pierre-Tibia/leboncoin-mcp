@@ -4,6 +4,7 @@ from typing import Optional
 import lbc
 from fastmcp import FastMCP
 
+from compact_ad import compact_ad
 from search_filters import build_real_estate_filters, city_names, keep_only_cities, lookup
 
 mcp = FastMCP("leboncoin", instructions=(
@@ -129,11 +130,17 @@ def search_ads(
     shippable: Optional[bool] = None,
     page: int = 1,
     limit: int = 10,
+    full: bool = False,
 ) -> dict:
     """Search for ads on Leboncoin.
 
     One zone per search: Leboncoin only uses the first zone of a list (verified by
     measurement on 12/11/2026), so give either latitude/longitude, or a region, or a department.
+
+    By default each ad is compact (15 fields, about 10x fewer tokens). "alerts" flags
+    à rénover, travaux, viager, occupé, loué, rez-de-chaussée, found in the title, the full text,
+    the sale type (viager) and the floor (0). No alert proves nothing: words can be missing
+    or phrased differently. Always call get_ad on the ads you keep.
 
     Args:
         text: Search query (e.g. "vélo électrique", "appartement 3 pièces").
@@ -169,6 +176,7 @@ def search_ads(
         shippable: Filter for shippable items only.
         page: Page number (starts at 1).
         limit: Results per page (max 35).
+        full: True to get every field of each ad (full text, images, all attributes).
     """
     kwargs = {}
     real_estate = build_real_estate_filters(property_type, surface_min, surface_max,
@@ -213,6 +221,10 @@ def search_ads(
     removed = {}
     if cities:
         ads, removed = keep_only_cities(ads, cities)
+    if not full:
+        by_id = {ad.id: ad for ad in result.ads}
+        ads = [compact_ad(by_id[a["id"]]) | ({"city_check": a["city_check"]} if "city_check" in a else {})
+               for a in ads]
 
     return {
         "total": result.total,

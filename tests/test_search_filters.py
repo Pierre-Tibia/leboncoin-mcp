@@ -36,6 +36,7 @@ MIXED_CITIES = ["Antibes 06600", "Juan-les-Pins 06160", "Vallauris 06220", "Moug
 
 def run_search(ads_cities=MIXED_CITIES, **params):
     """Lance search_ads avec un faux client. Renvoie (résultat, arguments envoyés à Leboncoin)."""
+    params.setdefault("full", True)  # ces tests lisent la réponse complète
     with mock.patch.object(server, "_client") as client:
         client.search.return_value = SimpleNamespace(
             total=len(ads_cities), total_pro=0, total_private=len(ads_cities), max_pages=1,
