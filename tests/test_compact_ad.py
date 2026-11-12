@@ -163,7 +163,60 @@ class TextAlertsTest(unittest.TestCase):
         self.assert_alerts("RDC, loué, à rénover, travaux", ["à rénover", "travaux", "loué", "rez-de-chaussée"])
 
 
+class NewAlertsTest(unittest.TestCase):
+    """Alertes ajoutées après relecture des annonces réelles du 12/11/2026."""
+
+    def test_renovation_expressions(self):
+        # Passage réel de l'annonce 3301613193.
+        for text in ["L'appartement nécessite une rénovation intérieure.", "besoin de rénovation"]:
+            with self.subTest(text=text):
+                self.assertEqual(find_text_alerts("", text), ["à rénover"])
+
+    def test_renovation_alone_is_not_an_alert(self):
+        self.assertEqual(find_text_alerts("", "Rénovation complète en 2020, entièrement rénové"), [])
+
+    def test_sous_compromis(self):
+        # Passage réel de l'annonce 3260557108.
+        for text in ["Appartement 2 pièces 40 m² Sous compromis : Découvrez", "Bien sous offre", "offre acceptée"]:
+            with self.subTest(text=text):
+                self.assertEqual(find_text_alerts("", text), ["sous compromis"])
+
+    def test_encheres(self):
+        for text in ["À vendre en IMMO-INTERACTIF, enchère en ligne gratuite", "vente aux enchères"]:
+            with self.subTest(text=text):
+                self.assertEqual(find_text_alerts("", text), ["enchères"])
+
+    def test_sans_ascenseur(self):
+        # Passages réels des annonces 3295219746, 3287442153, 3291514204.
+        for text in ["situé au premier étage d'une résidence sécurisée sans ascenseur",
+                     "l'immeuble ne dispose pas d'ascenseur", "pas d’ascenseur"]:
+            with self.subTest(text=text):
+                self.assertEqual(find_text_alerts("", text), ["sans ascenseur"])
+
+    def test_typographic_apostrophe_becomes_a_space(self):
+        self.assertEqual(find_text_alerts("", "Il n’y a pas d’ascenseur, appartement loué"), ["loué", "sans ascenseur"])
+
+    def test_with_elevator_is_not_an_alert(self):
+        self.assertEqual(find_text_alerts("", "Situé au 3ème étage avec ascenseur"), [])
+
+
 class AttributeAlertsTest(unittest.TestCase):
+
+    def test_works_from_condition_attribute(self):
+        ad = realistic_ad(attributes=[attribute("global_condition", "4", "État du bien", "Travaux à prévoir")])
+        self.assertEqual(find_alerts(ad), ["travaux"])
+
+    def test_good_condition_gives_no_alert(self):
+        ad = realistic_ad(attributes=[attribute("global_condition", "2", "État du bien", "Bon état")])
+        self.assertEqual(find_alerts(ad), [])
+
+    def test_no_elevator_from_attribute_label(self):
+        ad = realistic_ad(attributes=[attribute("elevator", "2", "Ascenseur", "Non")])
+        self.assertEqual(find_alerts(ad), ["sans ascenseur"])
+
+    def test_elevator_yes_gives_no_alert(self):
+        ad = realistic_ad(attributes=[attribute("elevator", "1", "Ascenseur", "Oui")])
+        self.assertEqual(find_alerts(ad), [])
 
     def test_viager_from_sale_type(self):
         ad = realistic_ad(attributes=[attribute("immo_sell_type", "viager")])

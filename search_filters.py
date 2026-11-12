@@ -76,8 +76,11 @@ def build_real_estate_filters(
 
 def _normalize(text: str) -> str:
     """« Juan-les-Pins » et « juan les pins » deviennent identiques : sans accents, minuscules, sans tirets."""
-    without_accents = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
-    return " ".join(re.split(r"[\s\-']+", without_accents.lower())).strip()
+    # On retire seulement les accents : l'apostrophe typographique (’) doit devenir un espace
+    # comme l'apostrophe droite, sinon « L’Escarène » deviendrait « lescarene ».
+    decomposed = unicodedata.normalize("NFKD", text)
+    without_accents = "".join(c for c in decomposed if not unicodedata.combining(c))
+    return " ".join(re.split(r"[\s\-'’]+", without_accents.lower())).strip()
 
 
 def city_names(city: Optional[str | list[str]]) -> list[str]:

@@ -137,10 +137,12 @@ def search_ads(
     One zone per search: Leboncoin only uses the first zone of a list (verified by
     measurement on 12/11/2026), so give either latitude/longitude, or a region, or a department.
 
-    By default each ad is compact (15 fields, about 10x fewer tokens). "alerts" flags
-    à rénover, travaux, viager, occupé, loué, rez-de-chaussée, found in the title, the full text,
-    the sale type (viager) and the floor (0). No alert proves nothing: words can be missing
-    or phrased differently. Always call get_ad on the ads you keep.
+    By default each ad is compact (15 fields, about 10x fewer tokens). "alerts" can contain:
+    à rénover, travaux, viager, occupé, loué, rez-de-chaussée, sans ascenseur, sous compromis,
+    enchères. They are found in the title and the full text, plus four Leboncoin attributes:
+    sale type viager, floor 0, condition "Travaux à prévoir", elevator "Non".
+    No alert proves nothing: words can be missing or phrased differently.
+    Always call get_ad on the ads you keep.
 
     Args:
         text: Search query (e.g. "vélo électrique", "appartement 3 pièces").

@@ -12,12 +12,16 @@ from typing import Any, Optional
 # (minuscules, sans accents, ponctuation remplacée par des espaces). Mots entiers seulement.
 ALERT_PHRASES = {
     "à rénover": ["a renover", "renover", "renovation a prevoir", "a rafraichir",
-                  "rafraichissement a prevoir", "a restaurer", "a moderniser"],
+                  "rafraichissement a prevoir", "a restaurer", "a moderniser",
+                  "necessite une renovation", "renovation interieure", "besoin de renovation"],
     "travaux": [],  # cherché à part : voir TRAVAUX_PATTERN (négations exclues)
     "viager": ["viager", "viagere", "nue propriete"],
     "occupé": ["occupe", "occupee", "locataire en place"],
     "loué": ["loue", "louee", "bail en cours"],
     "rez-de-chaussée": ["rez de chaussee", "rdc", "rez de jardin"],
+    "sans ascenseur": ["sans ascenseur", "pas d ascenseur", "aucun ascenseur"],
+    "sous compromis": ["sous compromis", "sous offre", "offre acceptee"],
+    "enchères": ["enchere", "encheres", "immo interactif", "vente aux encheres"],
 }
 
 # « travaux », sauf « sans travaux », « aucun travaux », « aucuns travaux », « pas de travaux ».
@@ -31,13 +35,18 @@ ROOMS_KEYS = ("rooms", "Nombre de pièces")
 BEDROOMS_KEYS = ("bedrooms", "Nombre de chambres")
 FLOOR_KEYS = ("floor_number", "Étage de votre bien")
 SELL_TYPE_KEYS = ("immo_sell_type",)
+CONDITION_KEYS = ("global_condition", "État du bien")
+ELEVATOR_KEYS = ("elevator", "Ascenseur")
 
 
 def normalize_text(text: Optional[str]) -> str:
     """« À RÉNOVER ! » devient « a renover » ; entouré d'espaces pour chercher des mots entiers."""
     if not text:
         return " "
-    without_accents = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
+    # On retire seulement les accents : l'apostrophe typographique (’) doit devenir un espace,
+    # sinon « pas d’ascenseur » deviendrait « pas dascenseur ».
+    decomposed = unicodedata.normalize("NFKD", text)
+    without_accents = "".join(c for c in decomposed if not unicodedata.combining(c))
     return " " + re.sub(r"[^a-z0-9]+", " ", without_accents.lower()).strip() + " "
 
 
@@ -65,6 +74,19 @@ def _attribute(ad: Any, keys: tuple[str, ...]) -> Optional[str]:
     return None
 
 
+def _attribute_says(ad: Any, keys: tuple[str, ...], expected: str) -> bool:
+    """Vrai si la valeur ou le libellé affiché de l'attribut vaut expected (sans majuscules ni accents).
+
+    Le libellé compte : pour « Ascenseur », la valeur peut être un code et le libellé « Non ».
+    """
+    wanted = normalize_text(expected)
+    for attribute in (getattr(ad, "attributes", None) or {}).values():
+        if attribute.key in keys or attribute.key_label in keys:
+            if wanted in (normalize_text(str(attribute.value or "")), normalize_text(str(attribute.value_label or ""))):
+                return True
+    return False
+
+
 def _first_int(value: Optional[str]) -> Optional[int]:
     """« 40 m² » → 40, « 1 ch. » → 1, rien → None."""
     match = re.search(r"\d+", value or "")
@@ -72,12 +94,17 @@ def _first_int(value: Optional[str]) -> Optional[int]:
 
 
 def find_alerts(ad: Any) -> list[str]:
-    """Alertes du texte, plus deux attributs Leboncoin : vente en viager et étage 0."""
-    alerts = find_text_alerts(ad.subject, ad.body)
-    if (_attribute(ad, SELL_TYPE_KEYS) or "").lower() == "viager" and "viager" not in alerts:
-        alerts.append("viager")
-    if _first_int(_attribute(ad, FLOOR_KEYS)) == 0 and "rez-de-chaussée" not in alerts:
-        alerts.append("rez-de-chaussée")
+    """Alertes du texte, plus quatre attributs Leboncoin : vente en viager, étage 0,
+    état « Travaux à prévoir » et ascenseur « Non »."""
+    alerts = set(find_text_alerts(ad.subject, ad.body))
+    if _attribute_says(ad, SELL_TYPE_KEYS, "viager"):
+        alerts.add("viager")
+    if _first_int(_attribute(ad, FLOOR_KEYS)) == 0:
+        alerts.add("rez-de-chaussée")
+    if _attribute_says(ad, CONDITION_KEYS, "Travaux à prévoir"):
+        alerts.add("travaux")
+    if _attribute_says(ad, ELEVATOR_KEYS, "Non"):
+        alerts.add("sans ascenseur")
     return [alert for alert in ALERT_PHRASES if alert in alerts]  # ordre stable
 
 

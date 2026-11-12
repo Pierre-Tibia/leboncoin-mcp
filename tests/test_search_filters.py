@@ -147,6 +147,11 @@ class CityFilterTest(unittest.TestCase):
         self.assertTrue(city_matches("Vallauris 06220", ["VALLAURÎS"]))
         self.assertTrue(city_matches("Saint-Étienne 42000", ["saint etienne"]))
 
+    def test_typographic_and_straight_apostrophes_are_the_same(self):
+        self.assertTrue(city_matches("L’Escarène 06440", ["L'Escarène"]))
+        self.assertTrue(city_matches("L'Escarène 06440", ["l’escarene"]))
+        self.assertTrue(city_matches("Villeneuve-d’Ascq 59650", ["villeneuve d ascq"]))
+
     def test_does_not_match_a_different_city_with_same_start(self):
         self.assertFalse(city_matches("Cagnes-sur-Mer 06800", ["Cagnes"]))
         self.assertFalse(city_matches(None, ["Antibes"]))
