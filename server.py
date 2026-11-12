@@ -196,6 +196,7 @@ def get_ad(ad_id: str) -> dict:
     ad = _client.get_ad(ad_id)
     result = _ad_to_dict(ad)
     result["favorites"] = ad.favorites
+    result["user_id"] = ad._user_id  # à passer à get_user pour connaître le vendeur
     return result
 
 
